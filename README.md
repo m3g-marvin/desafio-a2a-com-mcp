@@ -155,4 +155,3 @@ resumo: 36 passaram, 0 falharam, de 36 verificacoes
 ```
 
 O [log MCP desta execução](evidencias/mcp.jsonl) registra a descoberta antes da primeira chamada, o trace-id acima e ids distintos para chamada e retry.
-
