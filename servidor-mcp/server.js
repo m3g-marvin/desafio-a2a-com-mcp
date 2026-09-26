@@ -2,14 +2,10 @@ import {
   Server,
   createMcpHandler,
   createRequestStateCodec,
-  inputRequired,
-  inputResponse,
-  acceptedContent,
-  MissingRequiredClientCapabilityError,
   ProtocolError,
 } from '@modelcontextprotocol/server';
-import { z } from 'zod';
-import { criarAgenda, salas, politica } from './salas.js';
+import { AgendaSalas, politica } from './salas.js';
+import { criarTools } from './tools.js';
 
 export const STATE_TTL_SECONDS = 600;
 export function criarCodec(secret) {
@@ -26,26 +22,13 @@ export function criarCodec(secret) {
   });
 }
 
-const intervalSchema = z.object({ sala: z.string(), inicio: z.string(), fim: z.string() });
-const bookingSchema = intervalSchema.extend({ responsavel: z.string().min(1) });
-const roomSchema = z.object({
-  id: z.string(),
-  nome: z.string(),
-  capacidade: z.number().int(),
-  recursos: z.array(z.string()),
-});
-const complete = (data) => ({
-  content: [{ type: 'text', text: JSON.stringify(data) }],
-  structuredContent: data,
-});
-const executionError = (error) => ({ ...complete({ erro: error.message }), isError: true });
-
 export function criarHandler({
   secret = process.env.REQUEST_STATE_SECRET,
   log = console.error,
 } = {}) {
   const codec = criarCodec(secret);
-  const agenda = criarAgenda();
+  const agenda = new AgendaSalas();
+  const tools = criarTools({ agenda, codec });
   const handler = createMcpHandler(
     () => {
       // Server permite propagar erros de protocolo; McpServer converte erros
@@ -57,108 +40,8 @@ export function criarHandler({
           requestState: { verify: codec.verify },
         },
       );
-      const tools = new Map();
-      function registerTool(name, definition, handler) {
-        tools.set(name, { definition, handler });
-      }
-      registerTool(
-        'listar_salas',
-        {
-          description: 'Lista as salas com capacidade e recursos.',
-          inputSchema: z.object({}),
-          outputSchema: z.object({ salas: z.array(roomSchema) }),
-        },
-        () => complete({ salas }),
-      );
-      registerTool(
-        'consultar_disponibilidade',
-        {
-          description: 'Consulta disponibilidade e reservas em conflito.',
-          inputSchema: intervalSchema,
-        },
-        (args) => {
-          try {
-            agenda.validar(args);
-            const conflitos = agenda.conflitos(args);
-            return complete({ sala: args.sala, livre: conflitos.length === 0, conflitos });
-          } catch (error) {
-            return executionError(error);
-          }
-        },
-      );
-      registerTool(
-        'reservar_sala',
-        {
-          description: 'Reserva uma sala ou pede a escolha de uma alternativa.',
-          inputSchema: bookingSchema,
-        },
-        async (args, ctx) => {
-          const state = ctx.mcpReq.requestState();
-          try {
-            if (state) {
-              const response = inputResponse(ctx.mcpReq.inputResponses, state.key);
-              if (response.kind === 'elicit' && ['decline', 'cancel'].includes(response.action)) {
-                return complete({ reservado: false, motivo: 'Reserva recusada pelo usuario' });
-              }
-              const choice = acceptedContent(
-                ctx.mcpReq.inputResponses,
-                state.key,
-                z.object({ sala: z.enum(state.alternativas) }),
-              );
-              if (!choice)
-                throw new Error('Escolha invalida: selecione uma das alternativas oferecidas');
-              // Os argumentos reenviados nunca substituem os valores autenticados.
-              return complete(agenda.reservar({ ...state.args, sala: choice.sala }));
-            }
-            if (ctx.mcpReq.inputResponses) throw new Error('Continuacao sem requestState');
-            agenda.validar(args);
-            if (!agenda.conflitos(args).length) return complete(agenda.reservar(args));
-            const alternativas = agenda.alternativas(args);
-            if (!alternativas.length) throw new Error('Sem alternativas disponiveis no intervalo');
-            // O contrato exige form explícito, inclusive quando elicitation: {} existe.
-            if (
-              !ctx.mcpReq.envelope?.['io.modelcontextprotocol/clientCapabilities']?.elicitation
-                ?.form
-            ) {
-              throw new MissingRequiredClientCapabilityError({
-                requiredCapabilities: { elicitation: { form: {} } },
-              });
-            }
-            const key = 'escolha_de_sala';
-            return inputRequired({
-              inputRequests: {
-                [key]: inputRequired.elicit({
-                  message: 'A sala pedida esta ocupada nesse intervalo. Escolha uma alternativa.',
-                  requestedSchema: z.object({ sala: z.enum(alternativas) }),
-                }),
-              },
-              requestState: await codec.mint(
-                { tool: 'reservar_sala', args, alternativas, key },
-                ctx,
-              ),
-            });
-          } catch (error) {
-            if (error instanceof MissingRequiredClientCapabilityError) throw error;
-            return executionError(error);
-          }
-        },
-      );
-      server.setRequestHandler('tools/list', () => ({
-        tools: [...tools].map(([name, { definition }]) => ({
-          name,
-          description: definition.description,
-          inputSchema: z.toJSONSchema(definition.inputSchema),
-          ...(definition.outputSchema && { outputSchema: z.toJSONSchema(definition.outputSchema) }),
-        })),
-      }));
-      server.setRequestHandler('tools/call', (request, ctx) => {
-        const tool = tools.get(request.params.name);
-        if (!tool) throw new ProtocolError(-32602, `Tool inexistente: ${request.params.name}`);
-        const parsed = tool.definition.inputSchema.safeParse(request.params.arguments ?? {});
-        if (!parsed.success)
-          return executionError(new Error('Argumentos invalidos para a ferramenta'));
-        return tool.handler(parsed.data, ctx);
-      });
+      server.setRequestHandler('tools/list', tools.list);
+      server.setRequestHandler('tools/call', tools.call);
       server.setRequestHandler('resources/list', () => ({
         resources: [
           {
@@ -169,8 +52,9 @@ export function criarHandler({
         ],
       }));
       server.setRequestHandler('resources/read', (request) => {
-        if (request.params.uri !== 'politica://uso')
+        if (request.params.uri !== 'politica://uso') {
           throw new ProtocolError(-32602, 'Resource inexistente');
+        }
         return { contents: [{ uri: 'politica://uso', mimeType: 'text/markdown', text: politica }] };
       });
       return server;
@@ -180,8 +64,9 @@ export function criarHandler({
 
   return {
     async fetch(request) {
-      if (new URL(request.url).pathname !== '/mcp')
+      if (new URL(request.url).pathname !== '/mcp') {
         return new Response('Not found', { status: 404 });
+      }
       if (request.method === 'POST') {
         try {
           const body = await request.clone().json();
