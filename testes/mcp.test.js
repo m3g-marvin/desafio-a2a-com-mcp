@@ -2,7 +2,29 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { criarHandler, criarCodec, STATE_TTL_SECONDS } from '../servidor-mcp/server.js';
-import { criarAgenda } from '../servidor-mcp/salas.js';
+import { AgendaSalas } from '../servidor-mcp/salas.js';
+
+test('agendas isolam reservas por instancia e consultas nao alteram o estado interno', () => {
+  const first = new AgendaSalas();
+  const second = new AgendaSalas();
+  const booking = {
+    sala: 'sala-aquario',
+    inicio: '2020-11-04T10:00:00-03:00',
+    fim: '2020-11-04T11:00:00-03:00',
+    responsavel: 'Doc',
+  };
+  first.reservar(booking);
+  assert.equal(second.conflitos(booking).length, 0);
+
+  const conflicts = first.conflitos(booking);
+  conflicts[0].sala = 'sala-mirante';
+  conflicts[0].responsavel = 'Biff';
+  conflicts.length = 0;
+
+  assert.equal(first.conflitos(booking)[0].responsavel, 'Doc');
+  assert.throws(() => first.reservar(booking), /A sala escolhida ficou ocupada no intervalo/);
+  assert.equal(second.reservar(booking).reservado, true);
+});
 
 const secret = randomBytes(32).toString('hex');
 const args = {
@@ -124,13 +146,14 @@ test('form capability, headers espelhados, respostas inválidas e recusa', async
 });
 
 test('segredo externo obrigatório com no mínimo 32 bytes', () => {
-  for (const value of [undefined, '', 'a'.repeat(32), 'x'.repeat(64), 'a'.repeat(65)])
+  for (const value of [undefined, '', 'a'.repeat(32), 'x'.repeat(64), 'a'.repeat(65)]) {
     assert.throws(() => criarCodec(value));
+  }
   assert.doesNotThrow(() => criarCodec(secret));
 });
 
 test('política em -03:00, limites inclusivos, intervalos adjacentes e ordenação', () => {
-  const agenda = criarAgenda();
+  const agenda = new AgendaSalas();
   const interval = (inicio, fim) => ({ sala: 'sala-aquario', inicio, fim, responsavel: 'Doc' });
   agenda.reservar(interval('2026-11-03T11:00:00Z', '2026-11-03T13:00:00Z'));
   assert.equal(

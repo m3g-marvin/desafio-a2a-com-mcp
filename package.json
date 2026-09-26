@@ -11,13 +11,14 @@
     "start:agent": "node agente/index.js",
     "test": "node --test testes/*.test.js",
     "validate": "python3 validador/validar.py",
-    "format": "prettier --write servidor-mcp agente testes package.json .prettierrc.json",
-    "check": "prettier --check servidor-mcp agente testes package.json .prettierrc.json"
+    "format": "prettier --write servidor-mcp agente infra testes package.json .prettierrc.json",
+    "check": "prettier --check servidor-mcp agente infra testes package.json .prettierrc.json"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.1.0",
     "@modelcontextprotocol/node": "2.1.0",
     "@modelcontextprotocol/server": "2.1.0",
+    "dotenv": "18.0.4",
     "zod": "4.6.5"
   },
   "devDependencies": {
